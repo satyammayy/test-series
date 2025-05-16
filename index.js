@@ -37,6 +37,19 @@ const auth = new google.auth.GoogleAuth({
 });
 
 async function getLastRollNumber() {
+  const client = await auth.getClient();
+  const sheets = google.sheets({ version: 'v4', auth: client });
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${SHEET_NAME}!B2:B`
+  });
+
+  const rows = res.data.values || [];
+  const count = rows.filter(r => r[0] && !isNaN(r[0])).length;
+  return 1000 + count; // Roll number starts from 1001
+}
+async function getLastRollNumber() {
     const client = await auth.getClient();
     const sheets = google.sheets({ version: 'v4', auth: client });
   
@@ -47,8 +60,9 @@ async function getLastRollNumber() {
   
     const rows = res.data.values || [];
     const count = rows.filter(r => r[0] && !isNaN(r[0])).length;
-    return count; // Return count as last used roll number
+    return 1000 + count; // Roll number starts from 1001
   }
+  
   
 
 async function appendToSheet(data, rollStr) {
