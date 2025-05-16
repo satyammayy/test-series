@@ -20,7 +20,6 @@ const SHEET_NAME = 'Sheet1';
 
 if (!SHEET_ID) throw new Error('Missing SHEET_ID');
 
-// Express setup
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/webhook', express.json({
@@ -29,33 +28,32 @@ app.use('/webhook', express.json({
   }
 }));
 
-// Google Sheets auth
 const auth = new google.auth.GoogleAuth({
-    credentials: {
-      client_email: process.env.GOOGLE_CLIENT_EMAIL,
-      private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-    },
-    scopes: ['https://www.googleapis.com/auth/spreadsheets']
-  });
+  credentials: {
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  },
+  scopes: ['https://www.googleapis.com/auth/spreadsheets']
+});
 
 async function getLastRollNumber() {
-  const client = await auth.getClient();
-  const sheets = google.sheets({ version: 'v4', auth: client });
-
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!B2:B`
-  });
-
-  const rows = res.data.values || [];
-  const last = rows.map(r => parseInt(r[0])).filter(n => !isNaN(n)).pop();
-  return Number(last || 0);
-}
+    const client = await auth.getClient();
+    const sheets = google.sheets({ version: 'v4', auth: client });
+  
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_NAME}!B2:B`
+    });
+  
+    const rows = res.data.values || [];
+    const count = rows.filter(r => r[0] && !isNaN(r[0])).length;
+    return count; // Return count as last used roll number
+  }
+  
 
 async function appendToSheet(data, rollStr) {
   const client = await auth.getClient();
   const sheets = google.sheets({ version: 'v4', auth: client });
-
   const row = [
     new Date().toLocaleString('en-IN'),
     rollStr,
@@ -69,7 +67,6 @@ async function appendToSheet(data, rollStr) {
     data.amount,
     data.method
   ];
-
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A:K`,
@@ -79,7 +76,6 @@ async function appendToSheet(data, rollStr) {
   });
 }
 
-// WhatsApp
 let sockPromise;
 async function startSock() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
@@ -115,37 +111,8 @@ async function sendWhatsAppMessage(paymentData, roll) {
     orderId, paymentId, amount, currency, method,
     email, contact, notes = {}
   } = paymentData;
-
   const jid = `${cleanIndianMobile(notes.whatsapp_number || contact)}@s.whatsapp.net`;
-
-  const message = `💳 *GENESIS BIOLOGY PAYMENT RECEIPT*
-━━━━━━━━━━━━━━━━━━━━━
-✅ *Payment Verified*
-
-📄 *Order ID:* ${orderId}
-💳 *Payment ID:* ${paymentId}
-🎟️ *Roll Number:* ${roll.toString().padStart(4, '0')}
-💰 *Amount:* ₹${amount / 100} ${currency}
-📱 *Contact:* ${contact}
-📧 *Email:* ${email}
-🏦 *Method:* ${method}
-
-👤 *Name:* ${notes.name}
-🎂 *DOB:* ${notes.dob}
-📍 *Address:* ${notes.address}
-👨‍👩‍👦 *Guardian Name:* ${notes.guardian_name}
-
-━━━━━━━━━━━━━━━━━━━━━
-Thank you for registering for TEST-SERIES with Genesis Biology!
-📢 Please join the group:
-
-https://chat.whatsapp.com/Gr8LWnfJU9oAsQPRgy0HdO
-
-For support contact:
-1. +917005589986 (Sir Loya)
-2. +916009989088 (Radip K)
-3. +919863461949 (Satyam M)
-4. +918415809253 (Ka Seitabanta)`;
+  const message = `💳 *GENESIS BIOLOGY PAYMENT RECEIPT*\n━━━━━━━━━━━━━━━━━━━━━\n✅ *Payment Verified*\n\n📄 *Order ID:* ${orderId}\n💳 *Payment ID:* ${paymentId}\n🎟️ *Roll Number:* ${roll.toString().padStart(4, '0')}\n💰 *Amount:* ₹${amount / 100} ${currency}\n📱 *Contact:* ${contact}\n📧 *Email:* ${email}\n🏦 *Method:* ${method}\n\n👤 *Name:* ${notes.name}\n🎂 *DOB:* ${notes.dob}\n📍 *Address:* ${notes.address}\n👨‍👩‍👦 *Guardian Name:* ${notes.guardian_name}\n\n━━━━━━━━━━━━━━━━━━━━━\nThank you for registering for TEST-SERIES with Genesis Biology!\n📢 Please join the group:\n\nhttps://chat.whatsapp.com/Gr8LWnfJU9oAsQPRgy0HdO\n\nFor support contact:\n1. +917005589986 (Sir Loya)\n2. +916009989088 (Radip K)\n3. +919863461949 (Satyam M)\n4. +918415809253 (Ka Seitabanta)`;
 
   await sock.sendMessage(jid, { text: message });
 
@@ -160,13 +127,24 @@ For support contact:
   });
 }
 
-// Webhook Handler
+async function retry(fn, attempts = 3, delay = 1000) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i < attempts - 1) {
+        console.warn(`⚠️ Retry attempt ${i + 1} failed: ${err.message}`);
+        await new Promise(res => setTimeout(res, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 app.post('/webhook', async (req, res) => {
   const signature = req.headers['x-razorpay-signature'];
-  const expectedSignature = crypto
-    .createHmac('sha256', RAZORPAY_WEBHOOK_SECRET)
-    .update(req.rawBody)
-    .digest('hex');
+  const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(req.rawBody).digest('hex');
 
   if (signature !== expectedSignature) {
     console.log("❌ Signature mismatch");
@@ -187,19 +165,16 @@ app.post('/webhook', async (req, res) => {
     notes = {}
   } = payment;
 
-  // Reject invalid / test payment
-  if (!notes.name || !notes.whatsapp_number ) {
+  if (!notes.name || !notes.whatsapp_number) {
     console.warn("❌ Skipped invalid or test payment:", paymentId);
     return res.status(200).send("Ignored test/incomplete payment");
   }
 
   try {
-    // Get and increment roll safely
     const lastRoll = await getLastRollNumber();
     const nextRoll = lastRoll + 1;
     const rollStr = nextRoll.toString().padStart(4, '0');
 
-    // Append to sheet with final roll
     await appendToSheet({
       roll: rollStr,
       payment_id: paymentId,
@@ -215,8 +190,7 @@ app.post('/webhook', async (req, res) => {
 
     console.log("✅ Appended to Google Sheet with roll:", rollStr);
 
-    // Send WhatsApp confirmation
-    await sendWhatsAppMessage({
+    await retry(() => sendWhatsAppMessage({
       orderId,
       paymentId,
       amount,
@@ -225,9 +199,10 @@ app.post('/webhook', async (req, res) => {
       email,
       contact,
       notes
-    }, nextRoll);
+    }, nextRoll)).catch(err => {
+      console.error("❌ WhatsApp send failed:", err.message);
+    });
 
-    console.log("📤 WhatsApp message sent");
     res.status(200).send("Webhook received");
   } catch (err) {
     console.error("❌ Error processing payment:", err.message);
@@ -237,4 +212,8 @@ app.post('/webhook', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🚨 Unhandled Rejection:', reason);
 });
