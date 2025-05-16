@@ -188,7 +188,7 @@ app.post('/webhook', async (req, res) => {
   } = payment;
 
   // Reject invalid / test payment
-  if (!notes.name || !notes.whatsapp_number || amount < 50000) {
+  if (!notes.name || !notes.whatsapp_number ) {
     console.warn("❌ Skipped invalid or test payment:", paymentId);
     return res.status(200).send("Ignored test/incomplete payment");
   }
