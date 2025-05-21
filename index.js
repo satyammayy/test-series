@@ -1,3 +1,4 @@
+// app.js
 const express = require('express');
 const crypto = require('crypto');
 const dotenv = require('dotenv');
@@ -18,16 +19,9 @@ const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
 const SHEET_ID = process.env.SHEET_ID;
 const SHEET_NAME = 'Sheet1';
 
-if (!SHEET_ID) throw new Error('Missing SHEET_ID');
+if (!SHEET_ID) throw new Error('Missing SHEET_ID in .env');
 
-const app = express();
-app.use(express.static(path.join(__dirname, 'public')));
-app.use('/webhook', express.json({
-  verify: (req, res, buf) => {
-    req.rawBody = buf;
-  }
-}));
-
+// Google Sheets auth
 const auth = new google.auth.GoogleAuth({
   credentials: {
     client_email: process.env.GOOGLE_CLIENT_EMAIL,
@@ -36,51 +30,54 @@ const auth = new google.auth.GoogleAuth({
   scopes: ['https://www.googleapis.com/auth/spreadsheets']
 });
 
-async function getLastRollNumber() {
-  const client = await auth.getClient();
-  const sheets = google.sheets({ version: 'v4', auth: client });
+async function getClient() {
+  return auth.getClient();
+}
 
+// compute last roll
+async function getLastRollNumber() {
+  const client = await getClient();
+  const sheets = google.sheets({ version: 'v4', auth: client });
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!B2:B`
   });
-
   const rows = res.data.values || [];
   const count = rows.filter(r => r[0] && !isNaN(r[0])).length;
-  return 1000 + count; // Roll number starts from 1001
+  return 1000 + count;
 }
-async function getLastRollNumber() {
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
-  
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: `${SHEET_NAME}!B2:B`
-    });
-  
-    const rows = res.data.values || [];
-    const count = rows.filter(r => r[0] && !isNaN(r[0])).length;
-    return 1000 + count; // Roll number starts from 1001
-  }
-  
-  
 
-async function appendToSheet(data, rollStr) {
-  const client = await auth.getClient();
+// check duplicates by paymentId in column C
+async function hasProcessed(paymentId) {
+  const client = await getClient();
   const sheets = google.sheets({ version: 'v4', auth: client });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${SHEET_NAME}!C2:C`
+  });
+  const ids = (res.data.values || []).flat();
+  return ids.includes(paymentId);
+}
+
+// append row
+async function appendToSheet(paymentData, rollStr) {
+  const client = await getClient();
+  const sheets = google.sheets({ version: 'v4', auth: client });
+
   const row = [
     new Date().toLocaleString('en-IN'),
     rollStr,
-    data.payment_id,
-    data.name,
-    data.email,
-    data.phone,
-    data.dob,
-    data.guardian_name,
-    data.address,
-    data.amount,
-    data.method
+    paymentData.paymentId,
+    paymentData.name,
+    paymentData.email,
+    paymentData.contact,
+    paymentData.dob,
+    paymentData.guardian_name,
+    paymentData.address,
+    paymentData.amount,
+    paymentData.method
   ];
+
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A:K`,
@@ -90,6 +87,7 @@ async function appendToSheet(data, rollStr) {
   });
 }
 
+// WhatsApp (Baileys) setup
 let sockPromise;
 async function startSock() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
@@ -97,15 +95,20 @@ async function startSock() {
 
   sock.ev.on('creds.update', saveCreds);
   sock.ev.on('connection.update', ({ connection, qr, lastDisconnect }) => {
-    if (qr) qrcode.generate(qr, { small: true });
+    if (qr) {
+      console.log('📸 Scan this QR code:');
+      qrcode.generate(qr, { small: true });
+    }
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
       if (code !== DisconnectReason.loggedOut) sockPromise = startSock();
     }
-    if (connection === 'open') console.log('✅ WhatsApp ready');
+    if (connection === 'open') {
+      console.log('✅ WhatsApp ready');
+    }
   });
 
-  await new Promise((res) => sock.ev.on('connection.update', u => u.connection === 'open' && res()));
+  await new Promise(res => sock.ev.on('connection.update', u => u.connection === 'open' && res()));
   return sock;
 }
 function getSocket() {
@@ -121,80 +124,60 @@ function cleanIndianMobile(raw) {
 
 async function sendWhatsAppMessage(paymentData, roll) {
   const sock = await getSocket();
-  const {
-    orderId, paymentId, amount, currency, method,
-    email, contact, notes = {}
-  } = paymentData;
+  const { orderId, paymentId, amount, currency, method, email, contact, notes = {} } = paymentData;
+
   const jid = `${cleanIndianMobile(notes.whatsapp_number || contact)}@s.whatsapp.net`;
-  const message = `💳 *GENESIS BIOLOGY PAYMENT RECEIPT*\n━━━━━━━━━━━━━━━━━━━━━\n✅ *Payment Verified*\n\n📄 *Order ID:* ${orderId}\n💳 *Payment ID:* ${paymentId}\n🎟️ *Roll Number:* ${roll.toString().padStart(4, '0')}\n💰 *Amount:* ₹${amount / 100} ${currency}\n📱 *Contact:* ${contact}\n📧 *Email:* ${email}\n🏦 *Method:* ${method}\n\n👤 *Name:* ${notes.name}\n🎂 *DOB:* ${notes.dob}\n📍 *Address:* ${notes.address}\n👨‍👩‍👦 *Guardian Name:* ${notes.guardian_name}\n\n━━━━━━━━━━━━━━━━━━━━━\nThank you for registering for TEST-SERIES with Genesis Biology!\n📢 Please join the group:\n\nhttps://chat.whatsapp.com/Gr8LWnfJU9oAsQPRgy0HdO\n\nFor support contact:\n1. +917005589986 (Sir Loya)\n2. +916009989088 (Radip K)\n3. +919863461949 (Satyam M)\n4. +918415809253 (Ka Seitabanta)`;
+  const text =
+    `💳 *GENESIS BIOLOGY PAYMENT RECEIPT*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `✅ *Payment Captured*\n\n` +
+    `📄 *Order ID:* ${orderId}\n` +
+    `💳 *Payment ID:* ${paymentId}\n` +
+    `🎟️ *Roll Number:* ${roll.toString().padStart(4, '0')}\n` +
+    `💰 *Amount:* ₹${amount/100} ${currency}\n` +
+    `📱 *Contact:* ${contact}\n` +
+    `📧 *Email:* ${email}\n` +
+    `🏦 *Method:* ${method}\n\n` +
+    `👤 *Name:* ${notes.name}\n` +
+    `🎂 *DOB:* ${notes.dob}\n` +
+    `📍 *Address:* ${notes.address}\n` +
+    `👨‍👩‍👦 *Guardian:* ${notes.guardian_name}\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `Thank you for registering for TEST-SERIES with Genesis Biology!\n` +
+    `Join group: https://chat.whatsapp.com/Gr8LWnfJU9oAsQPRgy0HdO`;
 
-  await sock.sendMessage(jid, { text: message });
-
-  const groupInfo = await getUrlInfo('https://chat.whatsapp.com/Gr8LWnfJU9oAsQPRgy0HdO');
-  await sock.sendMessage(jid, {
-    text: 'https://chat.whatsapp.com/Gr8LWnfJU9oAsQPRgy0HdO',
-    linkPreview: {
-      ...groupInfo,
-      title: 'Genesis Biology – Test-Series Group',
-      description: 'Announcements, rules, and more'
-    }
-  });
+  await sock.sendMessage(jid, { text });
+  const preview = await getUrlInfo('https://chat.whatsapp.com/Gr8LWnfJU9oAsQPRgy0HdO');
+  await sock.sendMessage(jid, { text: preview.preview, linkPreview: { ...preview } });
 }
 
-async function retry(fn, attempts = 3, delay = 1000) {
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (i < attempts - 1) {
-        console.warn(`⚠️ Retry attempt ${i + 1} failed: ${err.message}`);
-        await new Promise(res => setTimeout(res, delay));
-      } else {
-        throw err;
-      }
-    }
-  }
-}
-
-app.post('/webhook', async (req, res) => {
-  const signature = req.headers['x-razorpay-signature'];
-  const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(req.rawBody).digest('hex');
-
-  if (signature !== expectedSignature) {
-    console.log("❌ Signature mismatch");
-    return res.status(400).send("Invalid signature");
-  }
-
-  const payment = req.body?.payload?.payment?.entity;
-  if (!payment) return res.status(400).send("Invalid payload");
-
-  const {
-    id: paymentId,
-    order_id: orderId,
-    amount,
-    currency,
-    method,
-    email,
-    contact,
-    notes = {}
-  } = payment;
-
-  if (!notes.name || !notes.whatsapp_number) {
-    console.warn("❌ Skipped invalid or test payment:", paymentId);
-    return res.status(200).send("Ignored test/incomplete payment");
-  }
-
+// process payment logic
+async function handlePayment(evt) {
   try {
+    const payment = evt.payload.payment.entity;
+    const {
+      id: paymentId,
+      order_id: orderId,
+      amount,
+      currency,
+      method,
+      email,
+      contact,
+      notes = {}
+    } = payment;
+
+    if (!notes.name || !notes.whatsapp_number) return;
+    if (await hasProcessed(paymentId)) return;
+
     const lastRoll = await getLastRollNumber();
     const nextRoll = lastRoll + 1;
     const rollStr = nextRoll.toString().padStart(4, '0');
 
     await appendToSheet({
-      roll: rollStr,
-      payment_id: paymentId,
+      paymentId,
       name: notes.name,
       email,
-      phone: contact,
+      contact,
       dob: notes.dob,
       guardian_name: notes.guardian_name,
       address: notes.address,
@@ -202,9 +185,7 @@ app.post('/webhook', async (req, res) => {
       method
     }, rollStr);
 
-    console.log("✅ Appended to Google Sheet with roll:", rollStr);
-
-    await retry(() => sendWhatsAppMessage({
+    await sendWhatsAppMessage({
       orderId,
       paymentId,
       amount,
@@ -213,21 +194,92 @@ app.post('/webhook', async (req, res) => {
       email,
       contact,
       notes
-    }, nextRoll)).catch(err => {
-      console.error("❌ WhatsApp send failed:", err.message);
+    }, nextRoll);
+
+  } catch (err) {
+    console.error('❌ handlePayment error:', err);
+  }
+}
+
+// initialize server
+async function init() {
+  try {
+    await getSocket(); // ensure WhatsApp session
+
+    const app = express();
+    app.use(express.static(path.join(__dirname, 'public')));
+    app.use('/webhook', express.json({
+      verify: (req, res, buf) => { req.rawBody = buf; }
+    }));
+    app.use(express.json());
+
+      // ─────────── Manual message send ───────────
+      app.post('/api/manual-send', async (req, res) => {
+        try {
+          const {
+            rollNumber,
+            orderId = 'MANUAL_ORDER',
+            paymentId = 'MANUAL_PAYMENT',
+            amount = 50000,
+            currency = 'INR',
+            method = 'manual',
+            email,
+            contact,
+            notes = {}
+          } = req.body;
+  
+          if (!rollNumber || !contact || !notes.name || !notes.whatsapp_number) {
+            return res.status(400).json({ error: 'Missing required fields' });
+          }
+  
+          await sendWhatsAppMessage({
+            orderId,
+            paymentId,
+            amount,
+            currency,
+            method,
+            email,
+            contact,
+            notes
+          }, rollNumber);
+  
+          res.status(200).json({ message: `✅ WhatsApp message sent to ${notes.whatsapp_number}` });
+        } catch (err) {
+          console.error('❌ Manual send error:', err);
+          res.status(500).json({ error: err.message });
+        }
+      });
+
+    // Razorpay webhook
+    app.post('/webhook', (req, res) => {
+      // verify signature
+      const sig = req.headers['x-razorpay-signature'] || '';
+      const expected = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET)
+        .update(req.rawBody).digest('hex');
+
+      // immediate ACK
+      res.status(200).send('OK');
+
+      if (sig !== expected) {
+        console.warn('❌ invalid signature');
+        return;
+      }
+      if (req.body.event !== 'payment.captured') {
+        return console.log('⏭️ ignored event', req.body.event);
+      }
+
+      // defer actual work
+      process.nextTick(() => handlePayment(req.body));
     });
 
-    res.status(200).send("Webhook received");
+    app.listen(PORT, () => {
+      console.log(`🚀 Server listening on http://localhost:${PORT}`);
+    });
+
   } catch (err) {
-    console.error("❌ Error processing payment:", err.message);
-    res.status(500).send("Error processing");
+    console.error('❌ init error:', err);
   }
-});
+}
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('🚨 Unhandled Rejection:', reason);
-});
+init();
+process.on('unhandledRejection', console.error);
